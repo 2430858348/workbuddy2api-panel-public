@@ -52,3 +52,8 @@ server.exe
 /startup.cmd
 run*.log
 run2*.log
+
+# 本机快捷方式与图标中间产物（wb2api-preview.png 已入库，其余不必）
+/*.lnk
+/wb2api.ico
+/wb-original.png
