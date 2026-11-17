@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -50,6 +51,7 @@ func stateSibling(stateFile, name string) string {
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
+	webSession := flag.Bool("web-session", false, "会话模式：面板页面关闭后自动停止服务（由桌面快捷方式启动时传入）")
 	flag.Parse()
 
 	cfg, err := Load(*cfgPath)
@@ -353,6 +355,47 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// 会话模式（桌面快捷方式启动）：页面关闭即停服，复用既有优雅退出链路。
+	// 兜底：心跳缺失 180s 也退出（浏览器后台标签页的定时器会被节流到约 60s，
+	// 故留足余量）；pagehide 的 bye 给 5s 宽限，刷新页面会在宽限内补心跳而撤销退出。
+	if *webSession {
+		var lastBeat atomic.Int64
+		var byeAt atomic.Int64
+		lastBeat.Store(time.Now().UnixNano())
+		pn.SetWebSessionHooks(
+			func() {
+				lastBeat.Store(time.Now().UnixNano())
+				byeAt.Store(0)
+			},
+			func() {
+				byeAt.Store(time.Now().Add(5 * time.Second).UnixNano())
+			},
+		)
+		go func() {
+			const idleLimit = 180 * time.Second
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case now := <-t.C:
+					if at := byeAt.Load(); at != 0 && now.UnixNano() >= at {
+						log.Printf("web-session: 面板页面已关闭，停止服务")
+						stop()
+						return
+					}
+					if now.UnixNano()-lastBeat.Load() > int64(idleLimit) {
+						log.Printf("web-session: 超过 %s 未收到页面心跳，停止服务", idleLimit)
+						stop()
+						return
+					}
+				}
+			}
+		}()
+	}
+
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 	sch.StartTaskSweep(ctx, cfg.TaskSweepInterval)

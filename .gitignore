@@ -45,3 +45,10 @@ docs/
 *.zip
 server.exe
 .DS_Store
+
+# 本机运维脚本（含本机绝对路径 / 一次性迁移工具，不进公开仓库）
+/*.py
+/launch.cmd
+/startup.cmd
+run*.log
+run2*.log

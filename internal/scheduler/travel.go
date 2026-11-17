@@ -60,7 +60,10 @@ func (s *Scheduler) RunTravelNow() {
 			continue // D4 门控：global 无 CN 任务体系，不发起任何上游调用
 		}
 		if a.IsEnterpriseSession() {
-			continue // 企业版 / 企业切换会话门控：无成长体系（growth 端点企业号 403；切换会话不计分），不发起任何上游调用
+			// 实验（2026-11-17）：原为 continue 静默跳过。当前发现新注册账号同样带
+			// token_source=enterprise_switch，且签到不受影响，怀疑上游判定已失效。
+			// 暂改为仅记日志、照常执行，观察上游是否真的拒绝。
+			log.Printf("travel %s: [实验] 企业切换会话，仍尝试执行", logfmt.Label(a.UID, a.Nickname))
 		}
 		if !first {
 			time.Sleep(travelAccountDelay)

@@ -375,6 +375,7 @@ func (s *Scheduler) waitSlot(ctx context.Context, next time.Time, step time.Dura
 // Run 主循环，阻塞直到 ctx 取消。
 // Reconfigure 触发 rearmSchedule 时提前唤醒重算（新时点/开关立即生效）。
 func (s *Scheduler) Run(ctx context.Context) {
+	s.catchUpMissed(ctx)
 	for {
 		next, kinds := s.nextWake(time.Now())
 		if next.IsZero() {
@@ -406,6 +407,56 @@ func (s *Scheduler) Run(ctx context.Context) {
 			s.runBatch(ctx, kinds)
 		}
 	}
+}
+
+// catchUpMissed 启动补跑：进程启动时若今天的任务时点已经过去，立即补执行一次。
+// 典型场景：签到排 9 点，但机器 10 点才开机，nextFire 会把下次点火推到明天 9 点，
+// 导致当天完全漏签。上游对签到/旅行/活跃等按天幂等（重复签到返回"今天已签到"），
+// 因此补跑是安全的。只在启动时判定一次，异步执行不阻塞主循环。
+func (s *Scheduler) catchUpMissed(ctx context.Context) {
+	now := time.Now()
+
+	s.schedMu.Lock()
+	checkinH, travelH := s.cfg.CheckinHours, s.cfg.TravelHours
+	activityH, keepaliveH := s.cfg.ActivityHours, s.cfg.KeepaliveHours
+	blackcatH, growthH := s.cfg.BlackcatHours, s.cfg.GrowthHours
+	checkinOff, travelOff := s.cfg.CheckinDisabled, s.cfg.TravelDisabled
+	activityOff, keepaliveOff := s.cfg.ActivityDisabled, s.cfg.KeepaliveDisabled
+	blackcatOff, growthOff := s.cfg.BlackcatDisabled, s.cfg.GrowthDisabled
+	s.schedMu.Unlock()
+
+	var kinds []taskKind
+	consider := func(off bool, hours []int, k taskKind) {
+		if off || len(hours) == 0 {
+			return
+		}
+		if now.Hour() >= minHour(hours) {
+			kinds = append(kinds, k)
+		}
+	}
+	consider(checkinOff, checkinH, taskCheckin)
+	consider(travelOff, travelH, taskTravel)
+	consider(activityOff, activityH, taskActivity)
+	consider(keepaliveOff, keepaliveH, taskKeepalive)
+	consider(blackcatOff, blackcatH, taskBlackcat)
+	consider(growthOff, growthH, taskGrowth)
+
+	if len(kinds) == 0 {
+		return
+	}
+	log.Printf("启动补跑：今天已有到点的任务，立即补执行 %d 类", len(kinds))
+	go s.runBatch(ctx, kinds)
+}
+
+// minHour 返回时点列表中的最小小时（要求列表非空）。
+func minHour(hours []int) int {
+	m := hours[0]
+	for _, h := range hours[1:] {
+		if h < m {
+			m = h
+		}
+	}
+	return m
 }
 
 // runBatch 并行派发一批任务（同一唤醒时刻的多类任务），等全部完成返回。

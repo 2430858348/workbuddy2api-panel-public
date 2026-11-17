@@ -11,6 +11,7 @@
 package panel
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -94,6 +95,11 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// webSessionHooks 会话模式回调（由 main 注入）：beat = 页面存活心跳，
+	// bye = 页面即将卸载。未注入时（开机自启的常驻模式）两个接口一律 no-op。
+	beatHook func()
+	byeHook  func()
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -196,6 +202,41 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/compensation", p.withAuth(p.compensation))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/compensation", p.withAuth(p.accountCompensationClaim))
 	p.mux.HandleFunc("POST /panel/api/compensation_all", p.withAuth(p.compensationAll))
+	p.mux.HandleFunc("POST /panel/api/beat", p.withAuth(p.webBeat))
+	p.mux.HandleFunc("POST /panel/api/bye", p.webBye)
+}
+
+// SetWebSessionHooks 注入「会话模式」回调（main 在 -web-session 下调用）。
+// 常驻模式不注入，两接口退化为 no-op。
+func (p *Panel) SetWebSessionHooks(onBeat, onBye func()) {
+	p.beatHook = onBeat
+	p.byeHook = onBye
+}
+
+// webBeat 页面存活心跳（走 withAuth，带 Bearer）。页面定时调用，
+// main 侧据此判断「网页还开着」。
+func (p *Panel) webBeat(w http.ResponseWriter, r *http.Request) {
+	if p.beatHook != nil {
+		p.beatHook()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// webBye 页面卸载通知。navigator.sendBeacon 无法携带 Authorization 头，
+// 因此密钥走 query 参数，用常量时间比较，不套 withAuth。
+func (p *Panel) webBye(w http.ResponseWriter, r *http.Request) {
+	key := p.apiKey()
+	if key != "" {
+		got := r.URL.Query().Get("key")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(key)) != 1 {
+			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
+			return
+		}
+	}
+	if p.byeHook != nil {
+		p.byeHook()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

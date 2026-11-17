@@ -1,10 +1,43 @@
 'use strict';
 /* ── 状态 ─────────────────────────────────────────────────────────── */
 const LS_KEY = 'wb2api.key', LS_THEME = 'wb2api.theme';
+/* 安全存储层：部分浏览器环境（禁用站点数据 / 严格隐私模式 / 部分受管终端）访问
+   localStorage 会直接抛 SecurityError —— 而本脚本在顶层就要读主题，一旦抛错整个
+   脚本中断，面板只剩空骨架。这里先探测一次，失败则降级到内存对象，保证面板在任何
+   环境下都能工作（代价：存储被禁时刷新页面需重新输入密钥）。 */
+const _ls = (() => {
+  try { return window.localStorage; } catch (e) { return null; }
+})();
+const LSS = (() => {
+  const mem = Object.create(null);
+  let ok = false;
+  if (_ls) {
+    try {
+      _ls.setItem('__wb2api_probe__', '1');
+      _ls.removeItem('__wb2api_probe__');
+      ok = true;
+    } catch (e) { ok = false; }
+  }
+  return {
+    get(k) {
+      if (ok) { try { return _ls.getItem(k); } catch (e) {} }
+      return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null;
+    },
+    set(k, v) {
+      if (ok) { try { _ls.setItem(k, v); return; } catch (e) {} }
+      mem[k] = v;
+    },
+    del(k) {
+      if (ok) { try { _ls.removeItem(k); return; } catch (e) {} }
+      delete mem[k];
+    }
+  };
+})();
+
 /* 账号备注与「积分到期提醒」折叠的本机键（同上：模块级声明放顶部，避开 TDZ）。 */
 const LS_REMARKS = 'wb2api.remarks.v1', LS_EXP_FOLD = 'wb2api.expfold.v1';
 let remarksCache = null;
-let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
+let theme = LSS.get(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
 let logPin = true, loginState = null, loginTimer = null;
@@ -37,7 +70,7 @@ function applyTheme() {
 addEventListener('change', applyTheme);
 $('btnTheme').onclick = () => {
   theme = effTheme() === 'light' ? 'dark' : 'light';
-  localStorage.setItem(LS_THEME, theme);
+  LSS.set(LS_THEME, theme);
   applyTheme();
 };
 applyTheme();
@@ -45,7 +78,7 @@ applyTheme();
 /* ── 请求 ─────────────────────────────────────────────────────────── */
 async function api(path, opts = {}) {
   const h = Object.assign({}, opts.headers || {});
-  const k = localStorage.getItem(LS_KEY);
+  const k = LSS.get(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body) h['Content-Type'] = 'application/json';
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
@@ -331,7 +364,7 @@ function openKey() { $('keyVeil').classList.add('on'); setTimeout(() => $('keyIn
 $('btnKey').onclick = async () => {
   const v = $('keyInput').value.trim();
   if (!v) return;
-  localStorage.setItem(LS_KEY, v);
+  LSS.set(LS_KEY, v);
   try {
     await api('overview');
     $('keyErr').hidden = true;
@@ -1266,7 +1299,7 @@ $('cfgForm').onsubmit = async ev => {
     toast(n ? '配置已保存，其中 ' + n + ' 项需重启进程生效' : '配置已保存并立即生效', 'ok');
     // 密钥可能已改：本次会话沿用新值，避免下一次轮询被 401。
     const k = $('cfgKey').value.trim();
-    if (k) localStorage.setItem(LS_KEY, k);
+    if (k) LSS.set(LS_KEY, k);
     loadConfig();
     loadOverview(true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
@@ -1345,7 +1378,7 @@ $('importFile').onchange = async () => {
   const fd = new FormData();
   fd.append('file', file);
   const h = {};
-  const k = localStorage.getItem(LS_KEY);
+  const k = LSS.get(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
   try {
     const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
@@ -3060,7 +3093,7 @@ if ($('pkDetail')) $('pkDetail').addEventListener('click', ev => {
    与 [PK_DEFAULT_DETAIL_LIMIT, renderPackages)），顶层 localStorage/$ 语句落进
    切片区会让无 DOM 桩的求值环境 ReferenceError——上游测试的切片边界不动。 */
 const LS_PK_SORT = 'pkSortMode';
-let pkSortMode = localStorage.getItem(LS_PK_SORT) || 'end_asc';
+let pkSortMode = LSS.get(LS_PK_SORT) || 'end_asc';
 const PK_SORT_LABELS = { end_asc: '按到期升序 · 近的在前', size_desc: '按面额降序' };
 // 排序切换时重排明细需要 detailLimit（上游折叠配置），loadPackages 拉到后缓存。
 let lastDetailLimit = PK_DEFAULT_DETAIL_LIMIT;
@@ -3070,11 +3103,11 @@ if ($('pkSort')) {
   $('pkSort').value = pkSortMode;
   if ($('pkSort').value !== pkSortMode) {        // localStorage 里存了废弃值：回落默认
     pkSortMode = 'end_asc';
-    localStorage.setItem(LS_PK_SORT, pkSortMode);   // 不用 removeItem：harness 桩无此方法
+    LSS.set(LS_PK_SORT, pkSortMode);   // 不用 removeItem：harness 桩无此方法
   }
   $('pkSort').onchange = () => {
     pkSortMode = $('pkSort').value;
-    localStorage.setItem(LS_PK_SORT, pkSortMode);
+    LSS.set(LS_PK_SORT, pkSortMode);
     if (lastPackages) renderPackages(lastPackages, lastDetailLimit);   // 数据在内存，直接重排
   };
 }
@@ -3354,7 +3387,7 @@ if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
    仍由服务端下发，不写回后端；备注是纯展示层信息，不参与选号 / 计费 / 鉴权。 */
 function remarksAll() {
   if (remarksCache) return remarksCache;
-  try { remarksCache = JSON.parse(localStorage.getItem(LS_REMARKS)) || {}; }
+  try { remarksCache = JSON.parse(LSS.get(LS_REMARKS)) || {}; }
   catch (e) { remarksCache = {}; }
   return remarksCache;
 }
@@ -3370,7 +3403,7 @@ function remarkName(uid, nameHtml) {
 }
 function storeRemarks(map) {
   remarksCache = map;
-  try { localStorage.setItem(LS_REMARKS, JSON.stringify(map)); } catch (e) {}
+  try { LSS.set(LS_REMARKS, JSON.stringify(map)); } catch (e) {}
 }
 
 /* 编辑器的行来自 overview 缓存（账号池加载过就有），另外补上「已有备注但当前列表里
@@ -3419,7 +3452,7 @@ if ($('btnRemarkSave')) $('btnRemarkSave').onclick = saveRemarkForm;
 /* ══ 首页「积分到期提醒」折叠（选择记在本机，默认展开）═════════════════════
    展开态是原行为：点「检查」就要能立刻看到结果，所以默认不折叠；用户收起一次后
    由 localStorage 记住。折叠只作用于列表容器，卡片标题与「检查」按钮始终可见。 */
-function expFolded() { return localStorage.getItem(LS_EXP_FOLD) === '1'; }
+function expFolded() { return LSS.get(LS_EXP_FOLD) === '1'; }
 function applyExpFold() {
   const pad = $('expPad'), btn = $('btnExpFold');
   if (!pad || !btn) return;
@@ -3430,8 +3463,29 @@ function applyExpFold() {
 }
 if ($('btnExpFold')) {
   $('btnExpFold').onclick = () => {
-    try { localStorage.setItem(LS_EXP_FOLD, expFolded() ? '0' : '1'); } catch (e) {}
+    try { LSS.set(LS_EXP_FOLD, expFolded() ? '0' : '1'); } catch (e) {}
     applyExpFold();
   };
 }
 applyExpFold();
+
+/* ── 会话心跳（仅服务端 -web-session 模式下生效）────────────────────
+   页面存活就定时报到；页面卸载时发 bye（sendBeacon 不能带请求头，密钥走
+   query）。服务端收到 bye 后给 5s 宽限，期间若心跳恢复（刷新页面）则撤销
+   退出；另有 180s 无心跳兜底。常驻模式下这两个接口是 no-op。 */
+(function () {
+  const beat = () => {
+    const k = LSS.get(LS_KEY);
+    if (!k) return;
+    fetch('/panel/api/beat', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + k }
+    }).catch(() => {});
+  };
+  beat();
+  setInterval(beat, 15000);
+  window.addEventListener('pagehide', () => {
+    const k = LSS.get(LS_KEY) || '';
+    try { navigator.sendBeacon('/panel/api/bye?key=' + encodeURIComponent(k)); } catch (e) {}
+  });
+})();

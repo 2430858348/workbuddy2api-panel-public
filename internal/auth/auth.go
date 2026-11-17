@@ -231,7 +231,13 @@ func (a *Auth) IsEnterpriseSession() bool {
 	if a.IsEnterprise() {
 		return true
 	}
-	return jwtTokenSource(a.AccessTokenValue()) == "enterprise_switch"
+	// 2026-11-17 实测修正：token_source=enterprise_switch 已不能作为「无成长体系」的判据。
+	// 依据：① 用户昨天新注册的账号同样带该标记，不可能是历史企业残留；
+	//       ② 实测该凭证下旅行领养 +300 credits、领奖 reward=7、签到 +100 均正常入账。
+	// 结论：该声明的语义已变化（很可能 realm 下所有 token 都会带上），继续据此跳过
+	// 会让旅行/成长任务/活跃上报全部白���面。现仅对真正的企业版账号（EnterpriseID 非空，
+	// growth 端点确实 403）判定为企业会话。
+	return false
 }
 
 // jwtTokenSource 解出 JWT payload 中的 token_source 声明；非 JWT / 解码失败
